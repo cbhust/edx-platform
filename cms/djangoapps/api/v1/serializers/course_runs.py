@@ -2,12 +2,18 @@ import six
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
-from rest_framework.fields import get_attribute
-
-from cms.djangoapps.contentstore.views.course import create_new_course, get_course_and_check_access, rerun_course
-from student.models import CourseAccessRole
+from rest_framework.fields import empty
 from xmodule.modulestore.django import modulestore
 
+from cms.djangoapps.contentstore.views.course import create_new_course, get_course_and_check_access, rerun_course
+from contentstore.views.assets import update_course_run_asset
+from openedx.core.lib.courses import course_image_url
+from student.models import CourseAccessRole
+
+IMAGE_TYPES = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+}
 User = get_user_model()
 
 
@@ -94,6 +100,38 @@ class CourseRunCreateSerializer(CourseRunSerializer):
             instance = create_new_course(user, _id['org'], _id['course'], _id['run'], validated_data)
             self.update_team(instance, team)
             return instance
+
+
+class CourseRunImageField(serializers.ImageField):
+    def get_attribute(self, instance):
+        return course_image_url(instance)
+
+    def run_validation(self, data=empty):
+        content_type = getattr(data, 'content_type')
+        if content_type not in IMAGE_TYPES:
+            raise serializers.ValidationError('{} is not a supported image type'.format(content_type))
+
+        return super(CourseRunImageField, self).run_validation(data)
+
+    def to_representation(self, value):
+        # Value will always be the URL path of the image.
+        request = self.context['request']
+        return request.build_absolute_uri(value)
+
+
+class CourseRunImageSerializer(serializers.Serializer):
+    # We set an empty default to prevent the parent serializer from attempting
+    # to save this value to the Course object.
+    card_image = CourseRunImageField(source='course_image', default=empty)
+
+    def update(self, instance, validated_data):
+        course_image = validated_data['course_image']
+        course_image.name = 'course_image.' + IMAGE_TYPES[course_image.content_type]
+        update_course_run_asset(instance.id, course_image)
+
+        instance.course_image = course_image.name
+        modulestore().update_item(instance, self.context['request'].user.id)
+        return instance
 
 
 class CourseRunRerunSerializer(CourseRunTeamSerializerMixin, serializers.Serializer):
